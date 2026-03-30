@@ -6,7 +6,7 @@ import traceback
 
 app = FastAPI()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 @app.get("/")
 async def root():
