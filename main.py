@@ -71,18 +71,17 @@ def send_text_message(chat_id, text):
         print(traceback.format_exc())
 
 @app.get("/test-ftd")
-async def test_ftd():
-    affiliate_name = "AlphaMedia"
-    total_ftds = 12
-    total_leads = 184
-
+async def test_ftd(
+    affiliate_name: str = "AlphaMedia",
+    total_ftds: int = 12,
+    total_leads: int = 184
+):
     message_text = format_ftd_message(affiliate_name, total_ftds, total_leads)
 
     test_group_id = -1003752696322
     send_text_message(test_group_id, message_text)
 
     return {"ok": True, "message_sent": message_text}
-
 
 def format_ftd_message(affiliate_name, total_ftds, total_leads):
     conversion_rate = 0
