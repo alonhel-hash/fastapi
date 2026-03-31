@@ -75,6 +75,24 @@ def send_text_message(chat_id, text):
         print("ERROR INSIDE send_text_message:", str(e))
         print(traceback.format_exc())
 
+def format_ftd_message(affiliate_name, total_ftds, total_leads):
+    conversion_rate = 0
+    if total_leads > 0:
+        conversion_rate = (total_ftds / total_leads) * 100
+
+    return (
+        f"🔥 You have a new FTD\n\n"
+        f"Affiliate: {affiliate_name}\n"
+        f"Overall results until now:\n"
+        f"FTDs: {total_ftds}\n"
+        f"Leads: {total_leads}\n"
+        f"Conversion Rate: {conversion_rate:.2f}%"
+    )
+
+def get_group_ids_for_affiliate(affiliate_name):
+    normalized_name = affiliate_name.lower().strip()
+    return AFFILIATE_GROUP_MAP.get(normalized_name, [])
+
 @app.get("/test-ftd")
 async def test_ftd(
     affiliate_name: str = "AlphaMedia",
@@ -99,20 +117,3 @@ async def test_ftd(
         "message_sent": message_text,
         "group_ids": group_ids
     }
-
-def format_ftd_message(affiliate_name, total_ftds, total_leads):
-    conversion_rate = 0
-    if total_leads > 0:
-        conversion_rate = (total_ftds / total_leads) * 100
-
-    return (
-        f"🔥 You have a new FTD\n\n"
-        f"Affiliate: {affiliate_name}\n"
-        f"Overall results until now:\n"
-        f"FTDs: {total_ftds}\n"
-        f"Leads: {total_leads}\n"
-        f"Conversion Rate: {conversion_rate:.2f}%"
-    )
-    def get_group_ids_for_affiliate(affiliate_name):
-    normalized_name = affiliate_name.lower().strip()
-    return AFFILIATE_GROUP_MAP.get(normalized_name, [])
