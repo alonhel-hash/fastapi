@@ -10,11 +10,9 @@ app = FastAPI()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
-
 @app.get("/")
 async def root():
     return {"message": "Bot is running"}
-
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -28,10 +26,6 @@ async def telegram_webhook(request: Request):
             return {"ok": True}
 
         text = (message.get("text") or "").strip()
-        if not text:
-            print("No text in message")
-            return {"ok": True}
-
         chat = message.get("chat", {})
         user = message.get("from", {})
 
@@ -50,18 +44,26 @@ async def telegram_webhook(request: Request):
         print("username =", username)
         print("text =", text)
 
-        # Only handle admin commands
         if text.startswith("/register_affiliate"):
+            print("STEP 1: command matched")
+            send_text_message(chat_id, "STEP 1 OK - command received")
+
             if chat_type not in ["group", "supergroup"]:
+                print("STEP 2: wrong chat type")
                 send_text_message(chat_id, "This command must be used inside a Telegram group.")
                 return {"ok": True}
 
+            print("STEP 2: checking admin")
             admin_ok, admin_msg = verify_or_bind_admin(username, telegram_user_id, first_name)
+            print("admin_ok =", admin_ok, "admin_msg =", admin_msg)
+
             if not admin_ok:
                 send_text_message(chat_id, admin_msg)
                 return {"ok": True}
 
             parsed = parse_register_affiliate_command(text)
+            print("parsed =", parsed)
+
             if not parsed["ok"]:
                 send_text_message(chat_id, parsed["error"])
                 return {"ok": True}
@@ -70,6 +72,7 @@ async def telegram_webhook(request: Request):
             affiliate_email = parsed["affiliate_email"]
             affiliate_hash = parsed["affiliate_hash"]
 
+            print("STEP 3: saving mapping")
             save_affiliate_group_mapping(
                 affiliate_name=affiliate_name,
                 affiliate_email=affiliate_email,
@@ -79,6 +82,7 @@ async def telegram_webhook(request: Request):
                 created_by_telegram_user_id=telegram_user_id,
             )
 
+            print("STEP 4: sending success")
             send_text_message(
                 chat_id,
                 "✅ Affiliate registered successfully\n\n"
@@ -95,12 +99,10 @@ async def telegram_webhook(request: Request):
         print(traceback.format_exc())
         return {"ok": False, "error": str(e)}
 
-
 def get_db_connection():
     if not DATABASE_URL:
         raise Exception("DATABASE_URL is missing")
     return psycopg.connect(DATABASE_URL)
-
 
 def verify_or_bind_admin(username, telegram_user_id, first_name):
     if not username:
@@ -119,14 +121,13 @@ def verify_or_bind_admin(username, telegram_user_id, first_name):
             row = cur.fetchone()
 
             if not row:
-                return False, "❌ You are not an allowed admin."
+                return False, f"❌ You are not an allowed admin. username={username}"
 
             admin_id, allowed_username, saved_telegram_user_id, is_active, is_verified = row
 
             if not is_active:
                 return False, "❌ Your admin access is not active."
 
-            # First-time bind: username is approved, bind real Telegram user ID
             if saved_telegram_user_id is None:
                 cur.execute(
                     """
@@ -142,22 +143,12 @@ def verify_or_bind_admin(username, telegram_user_id, first_name):
                 conn.commit()
                 return True, "Admin verified and bound successfully."
 
-            # Already bound: enforce real Telegram user ID
             if int(saved_telegram_user_id) != int(telegram_user_id):
                 return False, "❌ Your Telegram user ID does not match the approved admin account."
 
             return True, "Admin verified."
 
-
 def parse_register_affiliate_command(text):
-    """
-    Expected format:
-
-    /register_affiliate
-    name: AlphaMedia
-    email: alpha@company.com
-    hash: HASH123
-    """
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
     if len(lines) < 4:
@@ -215,7 +206,6 @@ def parse_register_affiliate_command(text):
         "affiliate_hash": affiliate_hash,
     }
 
-
 def save_affiliate_group_mapping(
     affiliate_name,
     affiliate_email,
@@ -226,7 +216,6 @@ def save_affiliate_group_mapping(
 ):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # If same affiliate_hash already mapped to same group, update it
             cur.execute(
                 """
                 SELECT id
@@ -287,12 +276,13 @@ def save_affiliate_group_mapping(
 
             conn.commit()
 
-
 def send_text_message(chat_id, text):
     try:
         if not BOT_TOKEN:
             print("BOT_TOKEN is missing")
             return
+
+        print("Sending Telegram message to chat_id =", chat_id)
 
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {
@@ -309,7 +299,8 @@ def send_text_message(chat_id, text):
         )
 
         with urllib.request.urlopen(req) as response:
-            print("Telegram sendMessage response:", response.read().decode("utf-8"))
+            body = response.read().decode("utf-8")
+            print("Telegram sendMessage response:", body)
 
     except Exception as e:
         print("ERROR INSIDE send_text_message:", str(e))
