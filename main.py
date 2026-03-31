@@ -8,6 +8,11 @@ app = FastAPI()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
+AFFILIATE_GROUP_MAP = {
+    "alphamedia": [-1003752696322],
+    "johnmedia": [-1003752696322],
+}
+
 @app.get("/")
 async def root():
     return {"message": "Bot is running"}
@@ -78,10 +83,22 @@ async def test_ftd(
 ):
     message_text = format_ftd_message(affiliate_name, total_ftds, total_leads)
 
-    test_group_id = -1003752696322
-    send_text_message(test_group_id, message_text)
+    group_ids = get_group_ids_for_affiliate(affiliate_name)
 
-    return {"ok": True, "message_sent": message_text}
+    if not group_ids:
+        return {
+            "ok": False,
+            "error": f"No group mapping found for affiliate '{affiliate_name}'"
+        }
+
+    for group_id in group_ids:
+        send_text_message(group_id, message_text)
+
+    return {
+        "ok": True,
+        "message_sent": message_text,
+        "group_ids": group_ids
+    }
 
 def format_ftd_message(affiliate_name, total_ftds, total_leads):
     conversion_rate = 0
@@ -96,3 +113,6 @@ def format_ftd_message(affiliate_name, total_ftds, total_leads):
         f"Leads: {total_leads}\n"
         f"Conversion Rate: {conversion_rate:.2f}%"
     )
+    def get_group_ids_for_affiliate(affiliate_name):
+    normalized_name = affiliate_name.lower().strip()
+    return AFFILIATE_GROUP_MAP.get(normalized_name, [])
