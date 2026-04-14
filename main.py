@@ -17,7 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 # 👉 PUT YOUR BOT USERNAME HERE (WITHOUT @)
-BOT_USERNAME = "your_bot_username"
+BOT_USERNAME = "PURPLBOT"
 
 @app.get("/")
 async def root():
