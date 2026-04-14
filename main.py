@@ -16,7 +16,6 @@ app = FastAPI()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
-# 👉 PUT YOUR BOT USERNAME HERE (WITHOUT @)
 BOT_USERNAME = "purplmasterbot"
 
 @app.get("/")
@@ -27,7 +26,6 @@ async def root():
 async def telegram_webhook(request: Request):
     try:
         data = await request.json()
-        print("Received update:", data)
 
         message = data.get("message")
         if not message:
@@ -43,16 +41,13 @@ async def telegram_webhook(request: Request):
         username = (user.get("username") or "").strip()
         first_name = (user.get("first_name") or "").strip()
 
-        print("chat_id =", chat_id)
-        print("text =", text)
-
         # =============================
         # REGISTER AFFILIATE
         # =============================
         if text.startswith("/register_affiliate"):
 
             if chat_type not in ["group", "supergroup"]:
-                send_text_message(chat_id, "❌ Use this command inside a Telegram group")
+                send_text_message(chat_id, "❌ Use inside a group")
                 return {"ok": True}
 
             admin_ok, admin_msg = verify_or_bind_admin(username, user.get("id"), first_name)
@@ -62,10 +57,6 @@ async def telegram_webhook(request: Request):
                 return {"ok": True}
 
             parsed = parse_register_affiliate_command(text)
-
-            if not parsed["ok"]:
-                send_text_message(chat_id, parsed["error"])
-                return {"ok": True}
 
             save_affiliate_group_mapping(
                 affiliate_name=parsed["affiliate_name"],
@@ -77,11 +68,10 @@ async def telegram_webhook(request: Request):
             )
 
             send_text_message(chat_id, "✅ Affiliate registered")
-
             return {"ok": True}
 
         # =============================
-        # 🤖 AI BOT RESPONSE (FIXED)
+        # 🤖 AI BOT RESPONSE (GROUP-SPECIFIC)
         # =============================
 
         entities = message.get("entities", [])
@@ -99,7 +89,7 @@ async def telegram_webhook(request: Request):
         if bot_tagged:
             print("BOT TAG DETECTED")
 
-            stats = get_today_stats()
+            stats = get_group_stats(chat_id)
             response = generate_smart_reply(text, stats)
 
             send_text_message(chat_id, response)
@@ -122,23 +112,43 @@ def get_db_connection():
     return psycopg.connect(DATABASE_URL)
 
 
-def get_today_stats():
+def get_group_stats(chat_id):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+
+            # get affiliate for this group
+            cur.execute("""
+                SELECT affiliate_name
+                FROM affiliate_group_mappings
+                WHERE telegram_group_id = %s
+                LIMIT 1
+            """, (chat_id,))
+            row = cur.fetchone()
+
+            if not row:
+                return {"leads": 0, "ftds": 0, "affiliate": "Unknown"}
+
+            affiliate = row[0]
 
             cur.execute("""
                 SELECT COUNT(*) FROM leads
                 WHERE signup_date >= CURRENT_DATE
-            """)
+                AND LOWER(TRIM(affiliate_name)) = LOWER(TRIM(%s))
+            """, (affiliate,))
             leads = int(cur.fetchone()[0])
 
             cur.execute("""
                 SELECT COUNT(*) FROM conversions
                 WHERE deposit_date >= CURRENT_DATE
-            """)
+                AND LOWER(TRIM(affiliate_name)) = LOWER(TRIM(%s))
+            """, (affiliate,))
             ftds = int(cur.fetchone()[0])
 
-            return {"leads": leads, "ftds": ftds}
+            return {
+                "leads": leads,
+                "ftds": ftds,
+                "affiliate": affiliate
+            }
 
 
 # =============================
@@ -149,24 +159,25 @@ def generate_smart_reply(text, stats):
 
     leads = stats["leads"]
     ftds = stats["ftds"]
-    cr = (ftds / leads * 100) if leads > 0 else 0
+    affiliate = stats["affiliate"]
 
+    cr = (ftds / leads * 100) if leads > 0 else 0
     text = text.lower()
 
     if "result" in text or "today" in text:
         return (
-            f"Today looks active so far.\n"
+            f"{affiliate} performance today:\n"
             f"FTDs: {ftds} | Leads: {leads} | CR: {cr:.2f}%\n\n"
-            f"If quality stays strong, there’s definitely room to push more volume."
+            f"If quality holds, there’s room to push more volume."
         )
 
     if "ftd" in text:
-        return f"Current FTD count today is {ftds}. Keep pushing 👍"
+        return f"{affiliate} currently has {ftds} FTDs today 👍"
 
     if "push" in text or "scale" in text:
-        return "Performance looks stable. If traffic quality holds, today is a good day to scale."
+        return f"{affiliate} looks stable today. If quality is good, scaling could work."
 
-    return "Things are moving steadily today. Let’s keep momentum 🚀"
+    return f"{affiliate} is moving steadily today. Let’s keep momentum 🚀"
 
 
 # =============================
