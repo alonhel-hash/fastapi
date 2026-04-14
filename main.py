@@ -16,8 +16,8 @@ app = FastAPI()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
-# 👉 CHANGE THIS to your bot username (without @)
-BOT_USERNAME = "YourBotUsername"
+# 👉 PUT YOUR BOT USERNAME HERE (WITHOUT @)
+BOT_USERNAME = "your_bot_username"
 
 @app.get("/")
 async def root():
@@ -38,10 +38,8 @@ async def telegram_webhook(request: Request):
         user = message.get("from", {})
 
         chat_id = fix_chat_id(chat.get("id"))
-        chat_title = chat.get("title") or chat.get("first_name") or "Unknown Chat"
         chat_type = chat.get("type")
 
-        telegram_user_id = user.get("id")
         username = (user.get("username") or "").strip()
         first_name = (user.get("first_name") or "").strip()
 
@@ -49,7 +47,7 @@ async def telegram_webhook(request: Request):
         print("text =", text)
 
         # =============================
-        # REGISTER AFFILIATE (EXISTING)
+        # REGISTER AFFILIATE
         # =============================
         if text.startswith("/register_affiliate"):
 
@@ -57,7 +55,7 @@ async def telegram_webhook(request: Request):
                 send_text_message(chat_id, "❌ Use this command inside a Telegram group")
                 return {"ok": True}
 
-            admin_ok, admin_msg = verify_or_bind_admin(username, telegram_user_id, first_name)
+            admin_ok, admin_msg = verify_or_bind_admin(username, user.get("id"), first_name)
 
             if not admin_ok:
                 send_text_message(chat_id, admin_msg)
@@ -74,26 +72,34 @@ async def telegram_webhook(request: Request):
                 affiliate_email=parsed["affiliate_email"],
                 affiliate_hash=parsed["affiliate_hash"],
                 telegram_group_id=chat_id,
-                telegram_group_title=chat_title,
-                created_by_telegram_user_id=telegram_user_id,
+                telegram_group_title=chat.get("title"),
+                created_by_telegram_user_id=user.get("id"),
             )
 
-            send_text_message(
-                chat_id,
-                f"✅ Affiliate registered\n{parsed['affiliate_name']}"
-            )
+            send_text_message(chat_id, "✅ Affiliate registered")
 
             return {"ok": True}
 
         # =============================
-        # 🤖 AI BOT RESPONSE (NEW)
+        # 🤖 AI BOT RESPONSE (FIXED)
         # =============================
-        if BOT_USERNAME.lower() in text.lower():
 
+        entities = message.get("entities", [])
+        bot_tagged = False
+
+        for ent in entities:
+            if ent.get("type") == "mention":
+                offset = ent.get("offset", 0)
+                length = ent.get("length", 0)
+                mention_text = text[offset:offset+length]
+
+                if BOT_USERNAME.lower() in mention_text.lower():
+                    bot_tagged = True
+
+        if bot_tagged:
             print("BOT TAG DETECTED")
 
             stats = get_today_stats()
-
             response = generate_smart_reply(text, stats)
 
             send_text_message(chat_id, response)
@@ -107,7 +113,7 @@ async def telegram_webhook(request: Request):
 
 
 # =============================
-# DB FUNCTIONS
+# DB
 # =============================
 
 def get_db_connection():
@@ -132,47 +138,39 @@ def get_today_stats():
             """)
             ftds = int(cur.fetchone()[0])
 
-            return {
-                "leads": leads,
-                "ftds": ftds
-            }
+            return {"leads": leads, "ftds": ftds}
 
 
 # =============================
-# 🤖 SMART REPLIES
+# 🤖 SMART REPLY
 # =============================
 
 def generate_smart_reply(text, stats):
 
     leads = stats["leads"]
     ftds = stats["ftds"]
-
     cr = (ftds / leads * 100) if leads > 0 else 0
 
-    # Simple intent detection
-    text_lower = text.lower()
+    text = text.lower()
 
-    if "result" in text_lower or "today" in text_lower:
+    if "result" in text or "today" in text:
         return (
             f"Today looks active so far.\n"
             f"FTDs: {ftds} | Leads: {leads} | CR: {cr:.2f}%\n\n"
-            f"There’s definitely room to push more volume if quality stays strong."
+            f"If quality stays strong, there’s definitely room to push more volume."
         )
 
-    if "ftd" in text_lower:
+    if "ftd" in text:
         return f"Current FTD count today is {ftds}. Keep pushing 👍"
 
-    if "push" in text_lower or "scale" in text_lower:
-        return (
-            f"Performance looks stable so far.\n"
-            f"If traffic quality is consistent, today looks like a good opportunity to scale."
-        )
+    if "push" in text or "scale" in text:
+        return "Performance looks stable. If traffic quality holds, today is a good day to scale."
 
-    return "Things are moving steadily today. Let’s keep the momentum going 🚀"
+    return "Things are moving steadily today. Let’s keep momentum 🚀"
 
 
 # =============================
-# EXISTING FUNCTIONS (UNCHANGED)
+# EXISTING FUNCTIONS
 # =============================
 
 def verify_or_bind_admin(username, telegram_user_id, first_name):
