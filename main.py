@@ -180,14 +180,95 @@ def build_full_report(stats):
 
     cr = (ftds / leads * 100) if leads > 0 else 0
 
-    return (
-        f"⏱ {affiliate} Live Report\n\n"
-        f"📊 Today so far:\n"
-        f"Leads: {leads}\n"
-        f"FTDs: {ftds}\n"
-        f"CR: {cr:.2f}%\n\n"
-        f"🚀 Keep pushing — momentum is building"
-    )
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+
+            # Yesterday same time
+            cur.execute("""
+                SELECT COUNT(*) FROM leads
+                WHERE signup_date >= DATE_TRUNC('day', NOW() - INTERVAL '1 day')
+                AND signup_date <= NOW() - INTERVAL '1 day'
+            """)
+            y_leads = int(cur.fetchone()[0])
+
+            cur.execute("""
+                SELECT COUNT(*) FROM conversions
+                WHERE deposit_date >= DATE_TRUNC('day', NOW() - INTERVAL '1 day')
+                AND deposit_date <= NOW() - INTERVAL '1 day'
+            """)
+            y_ftds = int(cur.fetchone()[0])
+
+            # Last week same time
+            cur.execute("""
+                SELECT COUNT(*) FROM leads
+                WHERE signup_date >= DATE_TRUNC('day', NOW() - INTERVAL '7 day')
+                AND signup_date <= NOW() - INTERVAL '7 day'
+            """)
+            w_leads = int(cur.fetchone()[0])
+
+            cur.execute("""
+                SELECT COUNT(*) FROM conversions
+                WHERE deposit_date >= DATE_TRUNC('day', NOW() - INTERVAL '7 day')
+                AND deposit_date <= NOW() - INTERVAL '7 day'
+            """)
+            w_ftds = int(cur.fetchone()[0])
+
+            # Top 3 affiliates today
+            cur.execute("""
+                WITH today_leads AS (
+                    SELECT affiliate_name, COUNT(*) AS leads
+                    FROM leads
+                    WHERE signup_date >= CURRENT_DATE
+                    GROUP BY affiliate_name
+                ),
+                today_ftds AS (
+                    SELECT affiliate_name, COUNT(*) AS ftds
+                    FROM conversions
+                    WHERE deposit_date >= CURRENT_DATE
+                    GROUP BY affiliate_name
+                )
+                SELECT
+                    COALESCE(l.affiliate_name, f.affiliate_name),
+                    COALESCE(l.leads, 0),
+                    COALESCE(f.ftds, 0)
+                FROM today_leads l
+                FULL OUTER JOIN today_ftds f
+                ON LOWER(TRIM(l.affiliate_name)) = LOWER(TRIM(f.affiliate_name))
+                ORDER BY 3 DESC, 2 DESC
+                LIMIT 3
+            """)
+            top = cur.fetchall()
+
+    # build message
+    message = f"⏱ Hourly Report\n\n"
+
+    message += f"📊 Today so far:\n"
+    message += f"Leads: {leads}\n"
+    message += f"FTDs: {ftds}\n"
+    message += f"CR: {cr:.2f}%\n\n"
+
+    message += f"📊 Yesterday same time:\n"
+    message += f"Leads: {y_leads}\n"
+    message += f"FTDs: {y_ftds}\n"
+    message += f"CR: {(y_ftds / y_leads * 100) if y_leads else 0:.2f}%\n\n"
+
+    message += f"📊 Last week same time:\n"
+    message += f"Leads: {w_leads}\n"
+    message += f"FTDs: {w_ftds}\n"
+    message += f"CR: {(w_ftds / w_leads * 100) if w_leads else 0:.2f}%\n\n"
+
+    message += f"🔥 Top 3 Affiliates Today:\n"
+
+    if not top:
+        message += "No data yet\n"
+    else:
+        for i, row in enumerate(top, 1):
+            name = row[0] or "Unknown"
+            l = int(row[1])
+            f = int(row[2])
+            message += f"{i}. {name} — {f} FTD / {l} Leads ({(f/l*100) if l else 0:.2f}%)\n"
+
+    return message
 
 
 # =============================
