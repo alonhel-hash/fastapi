@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 import os
 import urllib.request
+import urllib.parse
 import json
 import traceback
 import psycopg
@@ -15,17 +16,42 @@ app = FastAPI()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+GETLINKED_BASE_URL = os.getenv("GETLINKED_BASE_URL", "").strip()
+GETLINKED_API_KEY = os.getenv("GETLINKED_API_KEY", "").strip()
 
 BOT_USERNAME = "purplmasterbot"
+
+# New review group
+FTD_REVIEW_GROUP_ID = int(os.getenv("FTD_REVIEW_GROUP_ID", "-1003991625278"))
+
+# IMPORTANT:
+# Put here the EXACT sale status text you want to send when ignoring an FTD
+# Example: "Ignored"
+IGNORED_SALE_STATUS_VALUE = os.getenv("IGNORED_SALE_STATUS_VALUE", "").strip()
+
+
+@app.on_event("startup")
+def startup():
+    init_review_actions_table()
+
 
 @app.get("/")
 async def root():
     return {"message": "Bot is running"}
 
+
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     try:
         data = await request.json()
+
+        # =============================
+        # CALLBACK QUERY (INLINE BUTTONS)
+        # =============================
+        callback_query = data.get("callback_query")
+        if callback_query:
+            handle_callback_query(callback_query)
+            return {"ok": True}
 
         message = data.get("message")
         if not message:
@@ -50,6 +76,25 @@ async def telegram_webhook(request: Request):
             stats = get_group_stats(chat_id)
             response = build_full_report(stats)
             send_text_message(chat_id, response)
+            return {"ok": True}
+
+        # =============================
+        # /review <newDepositID>
+        # TEST A REVIEW MESSAGE WITH BUTTONS
+        # =============================
+        if text_lower.startswith("/review"):
+            parts = text.split()
+            if len(parts) < 2:
+                send_text_message(chat_id, "Usage: /review <newDepositID>")
+                return {"ok": True}
+
+            new_deposit_id = parts[1].strip()
+            review_text = build_review_message(new_deposit_id)
+            send_text_message(
+                FTD_REVIEW_GROUP_ID,
+                review_text,
+                reply_markup=build_inline_keyboard(new_deposit_id)
+            )
             return {"ok": True}
 
         # =============================
@@ -125,6 +170,71 @@ def get_db_connection():
     return psycopg.connect(DATABASE_URL)
 
 
+def init_review_actions_table():
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS telegram_ftd_review_actions (
+                    id SERIAL PRIMARY KEY,
+                    new_deposit_id TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    telegram_chat_id BIGINT,
+                    telegram_message_id BIGINT,
+                    telegram_user_id BIGINT,
+                    telegram_username TEXT,
+                    getlinked_response JSONB,
+                    status TEXT NOT NULL DEFAULT 'done',
+                    error_message TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_telegram_ftd_review_actions_new_deposit_id
+                ON telegram_ftd_review_actions (new_deposit_id)
+            """)
+            conn.commit()
+
+
+def log_review_action(
+    new_deposit_id,
+    action_type,
+    telegram_chat_id=None,
+    telegram_message_id=None,
+    telegram_user_id=None,
+    telegram_username=None,
+    getlinked_response=None,
+    status="done",
+    error_message=None,
+):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO telegram_ftd_review_actions (
+                    new_deposit_id,
+                    action_type,
+                    telegram_chat_id,
+                    telegram_message_id,
+                    telegram_user_id,
+                    telegram_username,
+                    getlinked_response,
+                    status,
+                    error_message
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (
+                str(new_deposit_id),
+                action_type,
+                telegram_chat_id,
+                telegram_message_id,
+                telegram_user_id,
+                telegram_username,
+                json.dumps(getlinked_response) if getlinked_response is not None else None,
+                status,
+                error_message,
+            ))
+            conn.commit()
+
+
 def get_group_stats(chat_id):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -163,6 +273,333 @@ def get_group_stats(chat_id):
             }
 
 
+def get_review_item(new_deposit_id):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    deposit_id,
+                    affiliate_name,
+                    affiliate_email,
+                    campaign_name,
+                    signup_date,
+                    deposit_date,
+                    raw_json
+                FROM conversions
+                WHERE deposit_id = %s
+                LIMIT 1
+            """, (str(new_deposit_id),))
+            row = cur.fetchone()
+
+            if not row:
+                return None
+
+            raw_json = row[6]
+            if isinstance(raw_json, str):
+                try:
+                    raw_json = json.loads(raw_json)
+                except Exception:
+                    raw_json = {}
+
+            return {
+                "deposit_id": row[0],
+                "affiliate_name": row[1],
+                "affiliate_email": row[2],
+                "campaign_name": row[3],
+                "signup_date": row[4],
+                "deposit_date": row[5],
+                "raw_json": raw_json or {},
+            }
+
+
+# =============================
+# GETLINKED API
+# =============================
+
+def process_under_review_deposit(
+    new_deposit_id,
+    affiliate_hash=None,
+    sale_status=None,
+    stop_sale_status_update=None,
+):
+    if not GETLINKED_BASE_URL:
+        raise Exception("GETLINKED_BASE_URL is missing")
+    if not GETLINKED_API_KEY:
+        raise Exception("GETLINKED_API_KEY is missing")
+
+    url = f"{GETLINKED_BASE_URL.rstrip('/')}/api/v2/new-deposits/process-stuck-deposits/{urllib.parse.quote(str(new_deposit_id))}"
+
+    payload = {
+        "newDepositID": str(new_deposit_id),
+    }
+
+    if affiliate_hash:
+        payload["affiliateHash"] = affiliate_hash
+
+    if sale_status:
+        payload["saleStatus"] = sale_status
+
+    if stop_sale_status_update is not None:
+        payload["stopSaleStatusUpdate"] = str(stop_sale_status_update)
+
+    encoded = urllib.parse.urlencode(payload).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=encoded,
+        headers={
+            "Api-Key": GETLINKED_API_KEY,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req) as response:
+        body = response.read().decode("utf-8")
+        try:
+            return json.loads(body)
+        except Exception:
+            return {"raw": body}
+
+
+# =============================
+# TELEGRAM CALLBACKS
+# =============================
+
+def build_inline_keyboard(new_deposit_id):
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Approve", "callback_data": f"approve_ftd:{new_deposit_id}"},
+                {"text": "❌ Ignore", "callback_data": f"ignore_ftd:{new_deposit_id}"}
+            ],
+            [
+                {"text": "🔄 Refresh", "callback_data": f"refresh_ftd:{new_deposit_id}"}
+            ]
+        ]
+    }
+
+
+def answer_callback_query(callback_query_id, text, show_alert=False):
+    if not BOT_TOKEN:
+        return
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+
+    data = json.dumps({
+        "callback_query_id": callback_query_id,
+        "text": text,
+        "show_alert": show_alert
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    urllib.request.urlopen(req)
+
+
+def edit_message_text(chat_id, message_id, text, reply_markup=None):
+    if not BOT_TOKEN:
+        return
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text
+    }
+
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+
+    data = json.dumps(payload).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    urllib.request.urlopen(req)
+
+
+def normalize_telegram_user(user):
+    username = (user.get("username") or "").strip()
+    if username:
+        return f"@{username}"
+
+    first_name = (user.get("first_name") or "").strip()
+    last_name = (user.get("last_name") or "").strip()
+    full_name = f"{first_name} {last_name}".strip()
+
+    return full_name or str(user.get("id") or "unknown")
+
+
+def build_review_message(new_deposit_id):
+    item = get_review_item(new_deposit_id)
+
+    if not item:
+        return f"FTD {new_deposit_id}\n\nCould not find this item in local DB yet."
+
+    raw = item["raw_json"] or {}
+
+    sale_status = raw.get("saleStatusMapped") or raw.get("saleStatus") or "N/A"
+    affiliate = item.get("affiliate_name") or "Unknown"
+    email = item.get("affiliate_email") or raw.get("email") or "N/A"
+    campaign_name = item.get("campaign_name") or raw.get("campaignName") or "N/A"
+    signup_date = item.get("signup_date") or raw.get("signupDate") or "N/A"
+    affiliate_hash = raw.get("affiliateHash") or "N/A"
+
+    text = "🧾 FTD Review Item\n\n"
+    text += f"New Deposit ID: {new_deposit_id}\n"
+    text += f"Affiliate: {affiliate}\n"
+    text += f"Email: {email}\n"
+    text += f"Sale Status: {sale_status}\n"
+    text += f"Signup Date: {signup_date}\n"
+    text += f"Offer / Campaign: {campaign_name}\n"
+    text += f"Affiliate Hash: {affiliate_hash}\n"
+
+    sources = raw.get("_underReviewSources") or []
+    if isinstance(sources, list) and sources:
+        text += "\nReview Sources:\n"
+        for src in sources:
+            statuses = src.get("statuses", [])
+            review_rule = src.get("reviewRule")
+            text += f"- statuses: {statuses} | reviewRule: {review_rule}\n"
+
+    return text
+
+
+def handle_callback_query(callback_query):
+    callback_data = (callback_query.get("data") or "").strip()
+    callback_query_id = callback_query.get("id")
+    from_user = callback_query.get("from", {})
+    message = callback_query.get("message", {}) or {}
+
+    chat = message.get("chat", {}) or {}
+    chat_id = fix_chat_id(chat.get("id"))
+    message_id = message.get("message_id")
+
+    if ":" not in callback_data:
+        answer_callback_query(callback_query_id, "Invalid action", True)
+        return
+
+    action, new_deposit_id = callback_data.split(":", 1)
+    actor = normalize_telegram_user(from_user)
+
+    try:
+        if action == "refresh_ftd":
+            refreshed_text = build_review_message(new_deposit_id)
+            edit_message_text(
+                chat_id,
+                message_id,
+                refreshed_text,
+                reply_markup=build_inline_keyboard(new_deposit_id)
+            )
+            answer_callback_query(callback_query_id, "Refreshed")
+            return
+
+        item = get_review_item(new_deposit_id)
+        raw = item["raw_json"] if item else {}
+        affiliate_hash = raw.get("affiliateHash")
+
+        if action == "approve_ftd":
+            response = process_under_review_deposit(
+                new_deposit_id=new_deposit_id,
+                affiliate_hash=affiliate_hash
+            )
+
+            updated_text = build_review_message(new_deposit_id)
+            updated_text += f"\n✅ ACTION: APPROVED\nBy: {actor}"
+
+            edit_message_text(
+                chat_id,
+                message_id,
+                updated_text,
+                reply_markup={
+                    "inline_keyboard": [
+                        [{"text": "🔄 Refresh", "callback_data": f"refresh_ftd:{new_deposit_id}"}]
+                    ]
+                }
+            )
+
+            log_review_action(
+                new_deposit_id=new_deposit_id,
+                action_type="approve",
+                telegram_chat_id=chat_id,
+                telegram_message_id=message_id,
+                telegram_user_id=from_user.get("id"),
+                telegram_username=actor,
+                getlinked_response=response,
+                status="done"
+            )
+
+            answer_callback_query(callback_query_id, "FTD approved")
+            return
+
+        if action == "ignore_ftd":
+            if not IGNORED_SALE_STATUS_VALUE:
+                answer_callback_query(callback_query_id, "IGNORED_SALE_STATUS_VALUE missing", True)
+                return
+
+            response = process_under_review_deposit(
+                new_deposit_id=new_deposit_id,
+                affiliate_hash=affiliate_hash,
+                sale_status=IGNORED_SALE_STATUS_VALUE,
+                stop_sale_status_update=1
+            )
+
+            updated_text = build_review_message(new_deposit_id)
+            updated_text += f"\n❌ ACTION: IGNORED\nBy: {actor}\nSale Status Sent: {IGNORED_SALE_STATUS_VALUE}"
+
+            edit_message_text(
+                chat_id,
+                message_id,
+                updated_text,
+                reply_markup={
+                    "inline_keyboard": [
+                        [{"text": "🔄 Refresh", "callback_data": f"refresh_ftd:{new_deposit_id}"}]
+                    ]
+                }
+            )
+
+            log_review_action(
+                new_deposit_id=new_deposit_id,
+                action_type="ignore",
+                telegram_chat_id=chat_id,
+                telegram_message_id=message_id,
+                telegram_user_id=from_user.get("id"),
+                telegram_username=actor,
+                getlinked_response=response,
+                status="done"
+            )
+
+            answer_callback_query(callback_query_id, "FTD ignored")
+            return
+
+        answer_callback_query(callback_query_id, "Unknown action", True)
+
+    except Exception as e:
+        log_review_action(
+            new_deposit_id=new_deposit_id,
+            action_type=action,
+            telegram_chat_id=chat_id,
+            telegram_message_id=message_id,
+            telegram_user_id=from_user.get("id"),
+            telegram_username=actor,
+            status="failed",
+            error_message=str(e)
+        )
+        answer_callback_query(callback_query_id, str(e), True)
+
+
 # =============================
 # FULL REPORT
 # =============================
@@ -170,7 +607,6 @@ def get_group_stats(chat_id):
 def build_full_report(stats):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Today global totals
             cur.execute("""
                 SELECT COUNT(*) FROM leads
                 WHERE signup_date >= CURRENT_DATE
@@ -183,7 +619,6 @@ def build_full_report(stats):
             """)
             ftds = int(cur.fetchone()[0])
 
-            # Yesterday same time
             cur.execute("""
                 SELECT COUNT(*) FROM leads
                 WHERE signup_date >= DATE_TRUNC('day', NOW() - INTERVAL '1 day')
@@ -198,7 +633,6 @@ def build_full_report(stats):
             """)
             y_ftds = int(cur.fetchone()[0])
 
-            # Last week same time
             cur.execute("""
                 SELECT COUNT(*) FROM leads
                 WHERE signup_date >= DATE_TRUNC('day', NOW() - INTERVAL '7 day')
@@ -213,7 +647,6 @@ def build_full_report(stats):
             """)
             w_ftds = int(cur.fetchone()[0])
 
-            # Last hour pace global
             cur.execute("""
                 SELECT COUNT(*) FROM leads
                 WHERE signup_date >= NOW() - INTERVAL '1 hour'
@@ -226,7 +659,6 @@ def build_full_report(stats):
             """)
             h_ftds = int(cur.fetchone()[0])
 
-            # Top 3 affiliates today
             cur.execute("""
                 WITH today_leads AS (
                     SELECT affiliate_name, COUNT(*) AS leads
@@ -410,17 +842,22 @@ def save_affiliate_group_mapping(
             conn.commit()
 
 
-def send_text_message(chat_id, text):
+def send_text_message(chat_id, text, reply_markup=None):
     try:
         if not BOT_TOKEN:
             return
 
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-        data = json.dumps({
+        payload = {
             "chat_id": chat_id,
             "text": text
-        }).encode("utf-8")
+        }
+
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+
+        data = json.dumps(payload).encode("utf-8")
 
         req = urllib.request.Request(
             url,
