@@ -44,14 +44,11 @@ async def telegram_webhook(request: Request):
         text_lower = text.lower()
 
         # =============================
-        # 🔥 NEW: /update COMMAND
+        # /update COMMAND
         # =============================
         if text_lower.startswith("/update"):
-            print("MANUAL UPDATE COMMAND")
-
             stats = get_group_stats(chat_id)
             response = build_full_report(stats)
-
             send_text_message(chat_id, response)
             return {"ok": True}
 
@@ -85,7 +82,7 @@ async def telegram_webhook(request: Request):
             return {"ok": True}
 
         # =============================
-        # 🤖 BOT TAG DETECTION
+        # BOT TAG DETECTION
         # =============================
 
         entities = message.get("entities", [])
@@ -101,8 +98,6 @@ async def telegram_webhook(request: Request):
                     bot_tagged = True
 
         if bot_tagged:
-            print("BOT TAG DETECTED")
-
             stats = get_group_stats(chat_id)
 
             if any(word in text_lower for word in ["update", "report", "status", "stats"]):
@@ -173,7 +168,6 @@ def get_group_stats(chat_id):
 # =============================
 
 def build_full_report(stats):
-
     leads = stats["leads"]
     ftds = stats["ftds"]
     affiliate = stats["affiliate"]
@@ -182,7 +176,6 @@ def build_full_report(stats):
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-
             # Yesterday same time
             cur.execute("""
                 SELECT COUNT(*) FROM leads
@@ -213,6 +206,21 @@ def build_full_report(stats):
             """)
             w_ftds = int(cur.fetchone()[0])
 
+            # Last hour pace
+            cur.execute("""
+                SELECT COUNT(*) FROM leads
+                WHERE signup_date >= NOW() - INTERVAL '1 hour'
+                AND LOWER(TRIM(affiliate_name)) = LOWER(TRIM(%s))
+            """, (affiliate,))
+            h_leads = int(cur.fetchone()[0])
+
+            cur.execute("""
+                SELECT COUNT(*) FROM conversions
+                WHERE deposit_date >= NOW() - INTERVAL '1 hour'
+                AND LOWER(TRIM(affiliate_name)) = LOWER(TRIM(%s))
+            """, (affiliate,))
+            h_ftds = int(cur.fetchone()[0])
+
             # Top 3 affiliates today
             cur.execute("""
                 WITH today_leads AS (
@@ -239,13 +247,17 @@ def build_full_report(stats):
             """)
             top = cur.fetchall()
 
-    # build message
     message = f"⏱ Hourly Report\n\n"
 
     message += f"📊 Today so far:\n"
     message += f"Leads: {leads}\n"
     message += f"FTDs: {ftds}\n"
     message += f"CR: {cr:.2f}%\n\n"
+
+    message += f"⚡ Last hour pace:\n"
+    message += f"Leads: {h_leads}\n"
+    message += f"FTDs: {h_ftds}\n"
+    message += f"CR: {(h_ftds / h_leads * 100) if h_leads else 0:.2f}%\n\n"
 
     message += f"📊 Yesterday same time:\n"
     message += f"Leads: {y_leads}\n"
@@ -266,7 +278,7 @@ def build_full_report(stats):
             name = row[0] or "Unknown"
             l = int(row[1])
             f = int(row[2])
-            message += f"{i}. {name} — {f} FTD / {l} Leads ({(f/l*100) if l else 0:.2f}%)\n"
+            message += f"{i}. {name} — {f} FTD / {l} Leads ({(f / l * 100) if l else 0:.2f}%)\n"
 
     return message
 
@@ -276,7 +288,6 @@ def build_full_report(stats):
 # =============================
 
 def generate_smart_reply(text, stats):
-
     leads = stats["leads"]
     ftds = stats["ftds"]
     affiliate = stats["affiliate"]
