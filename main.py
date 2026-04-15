@@ -168,14 +168,21 @@ def get_group_stats(chat_id):
 # =============================
 
 def build_full_report(stats):
-    leads = stats["leads"]
-    ftds = stats["ftds"]
-    affiliate = stats["affiliate"]
-
-    cr = (ftds / leads * 100) if leads > 0 else 0
-
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Today global totals
+            cur.execute("""
+                SELECT COUNT(*) FROM leads
+                WHERE signup_date >= CURRENT_DATE
+            """)
+            leads = int(cur.fetchone()[0])
+
+            cur.execute("""
+                SELECT COUNT(*) FROM conversions
+                WHERE deposit_date >= CURRENT_DATE
+            """)
+            ftds = int(cur.fetchone()[0])
+
             # Yesterday same time
             cur.execute("""
                 SELECT COUNT(*) FROM leads
@@ -206,19 +213,17 @@ def build_full_report(stats):
             """)
             w_ftds = int(cur.fetchone()[0])
 
-            # Last hour pace
+            # Last hour pace global
             cur.execute("""
                 SELECT COUNT(*) FROM leads
                 WHERE signup_date >= NOW() - INTERVAL '1 hour'
-                AND LOWER(TRIM(affiliate_name)) = LOWER(TRIM(%s))
-            """, (affiliate,))
+            """)
             h_leads = int(cur.fetchone()[0])
 
             cur.execute("""
                 SELECT COUNT(*) FROM conversions
                 WHERE deposit_date >= NOW() - INTERVAL '1 hour'
-                AND LOWER(TRIM(affiliate_name)) = LOWER(TRIM(%s))
-            """, (affiliate,))
+            """)
             h_ftds = int(cur.fetchone()[0])
 
             # Top 3 affiliates today
@@ -246,6 +251,8 @@ def build_full_report(stats):
                 LIMIT 3
             """)
             top = cur.fetchall()
+
+    cr = (ftds / leads * 100) if leads > 0 else 0
 
     message = f"⏱ Hourly Report\n\n"
 
