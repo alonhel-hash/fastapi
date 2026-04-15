@@ -41,6 +41,20 @@ async def telegram_webhook(request: Request):
         username = (user.get("username") or "").strip()
         first_name = (user.get("first_name") or "").strip()
 
+        text_lower = text.lower()
+
+        # =============================
+        # 🔥 NEW: /update COMMAND
+        # =============================
+        if text_lower.startswith("/update"):
+            print("MANUAL UPDATE COMMAND")
+
+            stats = get_group_stats(chat_id)
+            response = build_full_report(stats)
+
+            send_text_message(chat_id, response)
+            return {"ok": True}
+
         # =============================
         # REGISTER AFFILIATE
         # =============================
@@ -71,7 +85,7 @@ async def telegram_webhook(request: Request):
             return {"ok": True}
 
         # =============================
-        # 🤖 AI BOT RESPONSE (GROUP-SPECIFIC)
+        # 🤖 BOT TAG DETECTION
         # =============================
 
         entities = message.get("entities", [])
@@ -90,7 +104,11 @@ async def telegram_webhook(request: Request):
             print("BOT TAG DETECTED")
 
             stats = get_group_stats(chat_id)
-            response = generate_smart_reply(text, stats)
+
+            if any(word in text_lower for word in ["update", "report", "status", "stats"]):
+                response = build_full_report(stats)
+            else:
+                response = generate_smart_reply(text, stats)
 
             send_text_message(chat_id, response)
 
@@ -116,7 +134,6 @@ def get_group_stats(chat_id):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
 
-            # get affiliate for this group
             cur.execute("""
                 SELECT affiliate_name
                 FROM affiliate_group_mappings
@@ -152,7 +169,29 @@ def get_group_stats(chat_id):
 
 
 # =============================
-# 🤖 SMART REPLY
+# FULL REPORT
+# =============================
+
+def build_full_report(stats):
+
+    leads = stats["leads"]
+    ftds = stats["ftds"]
+    affiliate = stats["affiliate"]
+
+    cr = (ftds / leads * 100) if leads > 0 else 0
+
+    return (
+        f"⏱ {affiliate} Live Report\n\n"
+        f"📊 Today so far:\n"
+        f"Leads: {leads}\n"
+        f"FTDs: {ftds}\n"
+        f"CR: {cr:.2f}%\n\n"
+        f"🚀 Keep pushing — momentum is building"
+    )
+
+
+# =============================
+# SMART REPLY
 # =============================
 
 def generate_smart_reply(text, stats):
