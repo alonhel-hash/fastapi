@@ -659,92 +659,58 @@ def latest_reportable_conversions_cte(alias="latest_conversions"):
               AND resolved_status IN (1, 8)
         )
     """
-    
+def get_top_affiliates_today_detailed(cur):
+    cur.execute(f"""
+        {latest_reportable_conversions_cte("latest_conversions")}
+        ,
+        today_leads AS (
+            SELECT affiliate_name, COUNT(*) AS leads
+            FROM leads
+            WHERE signup_date >= CURRENT_DATE
+            GROUP BY affiliate_name
+        ),
+        today_ftd_breakdown AS (
+            SELECT
+                affiliate_name,
+                COUNT(*) AS ftds,
+                COUNT(*) FILTER (
+                    WHERE signup_date IS NOT NULL
+                      AND (signup_date AT TIME ZONE 'Asia/Jerusalem')::date =
+                          (deposit_date AT TIME ZONE 'Asia/Jerusalem')::date
+                ) AS live_ftds,
+                COUNT(*) FILTER (
+                    WHERE signup_date IS NOT NULL
+                      AND (signup_date AT TIME ZONE 'Asia/Jerusalem')::date =
+                          ((deposit_date AT TIME ZONE 'Asia/Jerusalem')::date - INTERVAL '1 day')
+                ) AS late_1d_ftds,
+                COUNT(*) FILTER (
+                    WHERE signup_date IS NOT NULL
+                      AND (signup_date AT TIME ZONE 'Asia/Jerusalem')::date <
+                          ((deposit_date AT TIME ZONE 'Asia/Jerusalem')::date - INTERVAL '1 day')
+                ) AS older_ftds
+            FROM latest_conversions
+            WHERE deposit_date >= CURRENT_DATE
+            GROUP BY affiliate_name
+        )
+        SELECT
+            COALESCE(l.affiliate_name, f.affiliate_name),
+            COALESCE(l.leads, 0),
+            COALESCE(f.ftds, 0),
+            COALESCE(f.live_ftds, 0),
+            COALESCE(f.late_1d_ftds, 0),
+            COALESCE(f.older_ftds, 0)
+        FROM today_leads l
+        FULL OUTER JOIN today_ftd_breakdown f
+        ON LOWER(TRIM(l.affiliate_name)) = LOWER(TRIM(f.affiliate_name))
+        ORDER BY 3 DESC, 2 DESC
+        LIMIT 10
+    """)
+    return cur.fetchall()
+
 def build_full_report(stats):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT COUNT(*) FROM leads
-                WHERE signup_date >= CURRENT_DATE
-            """)
-            leads = int(cur.fetchone()[0])
-
-            cur.execute(f"""
-                {latest_reportable_conversions_cte("latest_conversions")}
-                SELECT COUNT(*) FROM latest_conversions
-                WHERE deposit_date >= CURRENT_DATE
-            """)
-            ftds = int(cur.fetchone()[0])
-
-            cur.execute("""
-                SELECT COUNT(*) FROM leads
-                WHERE signup_date >= DATE_TRUNC('day', NOW() - INTERVAL '1 day')
-                AND signup_date <= NOW() - INTERVAL '1 day'
-            """)
-            y_leads = int(cur.fetchone()[0])
-
-            cur.execute(f"""
-                {latest_reportable_conversions_cte("latest_conversions")}
-                SELECT COUNT(*) FROM latest_conversions
-                WHERE deposit_date >= DATE_TRUNC('day', NOW() - INTERVAL '1 day')
-                AND deposit_date <= NOW() - INTERVAL '1 day'
-            """)
-            y_ftds = int(cur.fetchone()[0])
-
-            cur.execute("""
-                SELECT COUNT(*) FROM leads
-                WHERE signup_date >= DATE_TRUNC('day', NOW() - INTERVAL '7 day')
-                AND signup_date <= NOW() - INTERVAL '7 day'
-            """)
-            w_leads = int(cur.fetchone()[0])
-
-            cur.execute(f"""
-                {latest_reportable_conversions_cte("latest_conversions")}
-                SELECT COUNT(*) FROM latest_conversions
-                WHERE deposit_date >= DATE_TRUNC('day', NOW() - INTERVAL '7 day')
-                AND deposit_date <= NOW() - INTERVAL '7 day'
-            """)
-            w_ftds = int(cur.fetchone()[0])
-
-            cur.execute("""
-                SELECT COUNT(*) FROM leads
-                WHERE signup_date >= NOW() - INTERVAL '1 hour'
-            """)
-            h_leads = int(cur.fetchone()[0])
-
-            cur.execute(f"""
-                {latest_reportable_conversions_cte("latest_conversions")}
-                SELECT COUNT(*) FROM latest_conversions
-                WHERE deposit_date >= NOW() - INTERVAL '1 hour'
-            """)
-            h_ftds = int(cur.fetchone()[0])
-
-            cur.execute(f"""
-                {latest_reportable_conversions_cte("latest_conversions")}
-                ,
-                today_leads AS (
-                    SELECT affiliate_name, COUNT(*) AS leads
-                    FROM leads
-                    WHERE signup_date >= CURRENT_DATE
-                    GROUP BY affiliate_name
-                ),
-                today_ftds AS (
-                    SELECT affiliate_name, COUNT(*) AS ftds
-                    FROM latest_conversions
-                    WHERE deposit_date >= CURRENT_DATE
-                    GROUP BY affiliate_name
-                )
-                SELECT
-                    COALESCE(l.affiliate_name, f.affiliate_name),
-                    COALESCE(l.leads, 0),
-                    COALESCE(f.ftds, 0)
-                FROM today_leads l
-                FULL OUTER JOIN today_ftds f
-                ON LOWER(TRIM(l.affiliate_name)) = LOWER(TRIM(f.affiliate_name))
-                ORDER BY 3 DESC, 2 DESC
-                LIMIT 3
-            """)
-            top = cur.fetchall()
+            top = get_top_affiliates_today_detailed(cur)
 
     cr = (ftds / leads * 100) if leads > 0 else 0
 
@@ -770,7 +736,7 @@ def build_full_report(stats):
     message += f"FTDs: {w_ftds}\n"
     message += f"CR: {(w_ftds / w_leads * 100) if w_leads else 0:.2f}%\n\n"
 
-    message += f"🔥 Top 3 Affiliates Today:\n"
+    message += f"🔥 Top 10 Affiliates Today:\n"
 
     if not top:
         message += "No data yet\n"
@@ -779,7 +745,12 @@ def build_full_report(stats):
             name = row[0] or "Unknown"
             l = int(row[1])
             f = int(row[2])
+            live = int(row[3])
+            late_1d = int(row[4])
+            older = int(row[5])
+
             message += f"{i}. {name} — {f} FTD / {l} Leads ({(f / l * 100) if l else 0:.2f}%)\n"
+            message += f"   Live: {live} | Late 1d: {late_1d} | Older: {older}\n"
 
     return message
 
