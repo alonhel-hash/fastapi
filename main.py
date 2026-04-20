@@ -604,6 +604,62 @@ def handle_callback_query(callback_query):
 # FULL REPORT
 # =============================
 
+def latest_reportable_conversions_cte(alias="latest_conversions"):
+    return f"""
+        WITH normalized_conversions AS (
+            SELECT
+                c.*,
+                COALESCE(
+                    NULLIF(c.raw_json->>'depositID', ''),
+                    NULLIF(c.raw_json->>'brokerAccountDepositID', ''),
+                    NULLIF(c.raw_json->>'brokerAccountDepositId', ''),
+                    NULLIF(c.deposit_id, ''),
+                    LOWER(TRIM(COALESCE(c.email, c.raw_json->>'email', ''))) || '|' ||
+                    COALESCE(
+                        ((c.deposit_date AT TIME ZONE 'Asia/Jerusalem')::date)::text,
+                        ((c.updated_at AT TIME ZONE 'Asia/Jerusalem')::date)::text,
+                        'no_date'
+                    )
+                ) AS verification_key,
+                COALESCE(
+                    NULLIF(c.raw_json->>'depositStatus', '')::int,
+                    NULLIF(c.raw_json->>'status', '')::int,
+                    NULLIF(c.raw_json->>'reviewStatus', '')::int,
+                    NULLIF(c.raw_json->>'review_status', '')::int,
+                    NULLIF(c.raw_json->>'conversionStatus', '')::int,
+                    CASE
+                        WHEN COALESCE(c.raw_json->>'_pulledFrom', '') = 'under-review' THEN 0
+                        ELSE 1
+                    END
+                ) AS resolved_status
+            FROM conversions c
+            WHERE COALESCE(TRIM(c.email), TRIM(c.raw_json->>'email'), '') <> ''
+        ),
+        ranked_conversions AS (
+            SELECT
+                nc.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY nc.verification_key
+                    ORDER BY
+                        CASE
+                            WHEN nc.resolved_status = 1 THEN 1
+                            WHEN nc.resolved_status = 8 THEN 2
+                            WHEN nc.resolved_status = 0 THEN 3
+                            ELSE 4
+                        END,
+                        nc.updated_at DESC NULLS LAST,
+                        nc.deposit_date DESC NULLS LAST
+                ) AS rn
+            FROM normalized_conversions nc
+        ),
+        {alias} AS (
+            SELECT *
+            FROM ranked_conversions
+            WHERE rn = 1
+              AND resolved_status IN (1, 8)
+        )
+    """
+    
 def build_full_report(stats):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -613,8 +669,9 @@ def build_full_report(stats):
             """)
             leads = int(cur.fetchone()[0])
 
-            cur.execute("""
-                SELECT COUNT(*) FROM conversions
+            cur.execute(f"""
+                {latest_reportable_conversions_cte("latest_conversions")}
+                SELECT COUNT(*) FROM latest_conversions
                 WHERE deposit_date >= CURRENT_DATE
             """)
             ftds = int(cur.fetchone()[0])
@@ -626,8 +683,9 @@ def build_full_report(stats):
             """)
             y_leads = int(cur.fetchone()[0])
 
-            cur.execute("""
-                SELECT COUNT(*) FROM conversions
+            cur.execute(f"""
+                {latest_reportable_conversions_cte("latest_conversions")}
+                SELECT COUNT(*) FROM latest_conversions
                 WHERE deposit_date >= DATE_TRUNC('day', NOW() - INTERVAL '1 day')
                 AND deposit_date <= NOW() - INTERVAL '1 day'
             """)
@@ -640,8 +698,9 @@ def build_full_report(stats):
             """)
             w_leads = int(cur.fetchone()[0])
 
-            cur.execute("""
-                SELECT COUNT(*) FROM conversions
+            cur.execute(f"""
+                {latest_reportable_conversions_cte("latest_conversions")}
+                SELECT COUNT(*) FROM latest_conversions
                 WHERE deposit_date >= DATE_TRUNC('day', NOW() - INTERVAL '7 day')
                 AND deposit_date <= NOW() - INTERVAL '7 day'
             """)
@@ -653,14 +712,17 @@ def build_full_report(stats):
             """)
             h_leads = int(cur.fetchone()[0])
 
-            cur.execute("""
-                SELECT COUNT(*) FROM conversions
+            cur.execute(f"""
+                {latest_reportable_conversions_cte("latest_conversions")}
+                SELECT COUNT(*) FROM latest_conversions
                 WHERE deposit_date >= NOW() - INTERVAL '1 hour'
             """)
             h_ftds = int(cur.fetchone()[0])
 
-            cur.execute("""
-                WITH today_leads AS (
+            cur.execute(f"""
+                {latest_reportable_conversions_cte("latest_conversions")}
+                ,
+                today_leads AS (
                     SELECT affiliate_name, COUNT(*) AS leads
                     FROM leads
                     WHERE signup_date >= CURRENT_DATE
@@ -668,7 +730,7 @@ def build_full_report(stats):
                 ),
                 today_ftds AS (
                     SELECT affiliate_name, COUNT(*) AS ftds
-                    FROM conversions
+                    FROM latest_conversions
                     WHERE deposit_date >= CURRENT_DATE
                     GROUP BY affiliate_name
                 )
@@ -720,7 +782,6 @@ def build_full_report(stats):
             message += f"{i}. {name} — {f} FTD / {l} Leads ({(f / l * 100) if l else 0:.2f}%)\n"
 
     return message
-
 
 # =============================
 # SMART REPLY
